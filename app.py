@@ -265,6 +265,7 @@ if run_btn:
 
     # Parse uploads
     dataframes = {}
+    tab_stems  = {}   # tab_name → original filename stem (used for meta matching)
     parse_warnings = []
 
     for f in uploaded_files:
@@ -276,6 +277,10 @@ if run_btn:
                 parse_warnings.append(f"{f.name} — empty, skipped.")
                 continue
 
+            # Keep the raw stem so sheets.py can match it against Issues Overview names
+            raw_stem = f.name.lower().replace(".csv", "").strip()
+            raw_stem = re.sub(r"^\d+[-_]", "", raw_stem)
+
             tab_name = _filename_to_tab(f.name)
 
             # Deduplicate tab names
@@ -286,6 +291,7 @@ if run_btn:
                 i += 1
 
             dataframes[tab_name] = df
+            tab_stems[tab_name]  = raw_stem
 
         except Exception as e:
             parse_warnings.append(f"{f.name} — could not read: {e}")
@@ -313,7 +319,7 @@ if run_btn:
 
     with st.spinner("Exporting to Google Sheets…"):
         try:
-            sheet_url = create_sheet(sheet_name, dataframes, sheet_id, progress_cb)
+            sheet_url = create_sheet(sheet_name, dataframes, sheet_id, progress_cb, tab_stems=tab_stems)
         except Exception as e:
             error_msg = str(e)
 
