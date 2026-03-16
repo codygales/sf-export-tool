@@ -10,6 +10,19 @@ from sheets import create_sheet
 
 # ── Helpers (must be defined before use) ─────────────────────────────────────
 
+def _extract_sheet_id(value: str) -> str | None:
+    """Extract Sheet ID from a full Google Sheets URL or return as-is if already an ID."""
+    import re
+    # Match /d/SHEET_ID/ in a URL
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", value)
+    if match:
+        return match.group(1)
+    # If it looks like a raw ID (no spaces, alphanumeric + dashes)
+    if re.match(r"^[a-zA-Z0-9_-]{20,}$", value):
+        return value
+    return None
+
+
 def _filename_to_tab(filename: str) -> str:
     """Convert an SF export filename to a readable GSheet tab name."""
 
@@ -163,18 +176,35 @@ if not st.session_state.get("authenticated"):
 st.title("🕷️ SF Issues → Google Sheets")
 st.caption("Upload your Screaming Frog issue CSVs and get a structured Google Sheet instantly.")
 
-with st.expander("ℹ️ How to export from Screaming Frog", expanded=False):
+with st.expander("ℹ️ How to use this tool", expanded=False):
     st.markdown("""
-**Export all issues at once (recommended):**
+### First-time setup (once per client sheet)
+1. Go to [Google Sheets](https://sheets.google.com) and create a **blank spreadsheet**
+2. Click **Share** and add `gsheets@gsheets-490414.iam.gserviceaccount.com` as an **Editor**
+3. Copy the Sheet ID from the URL — it's the long string between `/d/` and `/edit`
+   - e.g. `https://docs.google.com/spreadsheets/d/`**`1w_Hm9yU...`**`/edit`
+4. Paste that ID (or the full URL) into the **Google Sheet ID or URL** field below
+
+---
+
+### Exporting issues from Screaming Frog
+**Bulk export (recommended — gets everything at once):**
 1. Run your crawl in Screaming Frog
-2. Go to **Reports → Bulk Export → Issues** and export each issue type
-3. Upload all the CSVs below at once
+2. Go to **Reports → Bulk Export → Issues**
+3. Export each issue type you want — save all CSVs to the same folder
+4. Upload them all below at once
 
 **Or export individual issues:**
-1. In SF, open the **Issues** tab (left panel)
-2. Click any issue type (e.g. *4xx Client Errors*)
-3. Click **Export** (bottom right) → CSV
-4. Repeat for each issue you want, then upload all at once below
+1. Open the **Issues** panel in SF (left sidebar)
+2. Click an issue type → **Export** button (bottom right) → CSV
+3. Repeat for each issue, then upload all CSVs below together
+
+---
+
+### Each time you run an export
+- The sheet is **fully rebuilt** each run — old tabs are replaced with fresh data
+- Use a **separate sheet per client** (create one, share it, reuse the same ID every time)
+- The **client/domain name** you enter becomes the cover page title
 """)
 
 st.divider()
@@ -186,14 +216,14 @@ with col1:
     client_name = st.text_input(
         "Client / domain name",
         placeholder="e.g. example.com",
-        help="Used as the Google Sheet name. Each run creates a new sheet.",
+        help="Used as the cover page title and tab labels.",
     )
 
 with col2:
-    share_email = st.text_input(
-        "Share sheet to (email)",
-        value="codygalesukl@gmail.com",
-        help="The finished sheet will be shared to this Google account.",
+    sheet_input = st.text_input(
+        "Google Sheet ID or URL",
+        placeholder="Paste the Sheet ID or full URL",
+        help="Create a blank sheet in your Drive, share it with the service account as editor, then paste the ID or URL here.",
     )
 
 uploaded_files = st.file_uploader(
@@ -221,8 +251,12 @@ if run_btn:
     errors = []
     if not client_name.strip():
         errors.append("Please enter a client or domain name.")
-    if not share_email.strip():
-        errors.append("Please enter an email address to share the sheet to.")
+    if not sheet_input.strip():
+        errors.append("Please paste a Google Sheet ID or URL.")
+
+    sheet_id = _extract_sheet_id(sheet_input.strip())
+    if sheet_input.strip() and not sheet_id:
+        errors.append("Could not read a Sheet ID from that input. Paste the full URL or just the ID from the URL.")
 
     if errors:
         for e in errors:
@@ -265,9 +299,7 @@ if run_btn:
         st.error("No valid CSV data found in the uploaded files.")
         st.stop()
 
-    # Sheet name includes date to avoid overwrites
-    timestamp = datetime.now().strftime("%d %b %Y")
-    sheet_name = f"{client_name.strip()} — SF Issues ({timestamp})"
+    sheet_name = client_name.strip()
 
     log = st.empty()
     messages = []
@@ -281,7 +313,7 @@ if run_btn:
 
     with st.spinner("Exporting to Google Sheets…"):
         try:
-            sheet_url = create_sheet(sheet_name, dataframes, share_email.strip(), progress_cb)
+            sheet_url = create_sheet(sheet_name, dataframes, sheet_id, progress_cb)
         except Exception as e:
             error_msg = str(e)
 

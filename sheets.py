@@ -28,38 +28,31 @@ def get_client() -> gspread.Client:
     return gspread.authorize(get_credentials())
 
 
-def create_sheet(sheet_name: str, dataframes: dict, share_email: str, progress_cb=None) -> str:
+def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=None) -> str:
     """
-    Create a Google Sheet with one tab per issue DataFrame + a cover page.
+    Write issue DataFrames into an existing Google Sheet (owned by the user).
+    Clears all existing worksheets and rebuilds from scratch.
     Returns the spreadsheet URL.
     """
     client = get_client()
 
-    # ── Create spreadsheet ──────────────────────────────────────────────────
+    # ── Open existing spreadsheet by ID ────────────────────────────────────
     if progress_cb:
-        progress_cb("📊 Creating Google Sheet…")
+        progress_cb("📊 Opening Google Sheet…")
 
-    sh = client.create(sheet_name)
-    time.sleep(1)
+    sh = client.open_by_key(sheet_id)
+    time.sleep(0.5)
 
-    if share_email:
+    # Clear all existing worksheets so we start fresh
+    existing = sh.worksheets()
+    # Must keep at least one sheet — add a temp sheet first
+    temp = sh.add_worksheet(title="_temp", rows="1", cols="1")
+    for ws in existing:
         try:
-            # Transfer ownership so the file lives in the user's Drive,
-            # not the service account's (avoids quota issues)
-            creds = get_credentials()
-            drive = build("drive", "v3", credentials=creds)
-            drive.permissions().create(
-                fileId=sh.id,
-                transferOwnership=True,
-                sendNotificationEmail=False,
-                body={"type": "user", "role": "owner", "emailAddress": share_email},
-            ).execute()
+            sh.del_worksheet(ws)
         except Exception:
-            # Fallback: share as writer if ownership transfer fails
-            try:
-                sh.share(share_email, perm_type="user", role="writer", notify=False)
-            except Exception:
-                pass
+            pass
+    time.sleep(0.5)
 
     # ── Build issue tabs ────────────────────────────────────────────────────
     tab_info = []  # [(tab_name, row_count, gid)]
@@ -95,10 +88,9 @@ def create_sheet(sheet_name: str, dataframes: dict, share_email: str, progress_c
 
     _create_cover(sh, sheet_name, tab_info)
 
-    # Delete the default empty Sheet1
+    # Delete the temp placeholder sheet
     try:
-        default = sh.worksheet("Sheet1")
-        sh.del_worksheet(default)
+        sh.del_worksheet(sh.worksheet("_temp"))
     except Exception:
         pass
 
