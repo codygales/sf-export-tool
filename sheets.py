@@ -131,7 +131,7 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
 # ── Cover page ────────────────────────────────────────────────────────────────
 
 def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, overview_df=None):
-    cover = sh.add_worksheet(title="Cover", rows="300", cols="10")
+    cover = sh.add_worksheet(title="Dashboard", rows="300", cols="10")
 
     try:
         all_ws = sh.worksheets()
