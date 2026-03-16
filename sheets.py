@@ -55,44 +55,64 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
     time.sleep(0.5)
 
     # ── Build issue tabs ────────────────────────────────────────────────────
-    tab_info = []  # [(tab_name, row_count, gid)]
+    tab_info = []   # [(tab_name, row_count, gid)]
+    skipped = []    # tabs that failed
 
-    for display_name, df in dataframes.items():
-        if progress_cb:
-            progress_cb(f"📋 Writing: {display_name} ({len(df):,} rows)…")
-
-        tab_name = display_name[:99]
-
-        try:
-            ws = sh.add_worksheet(
-                title=tab_name,
-                rows=str(len(df) + 5),
-                cols=str(max(len(df.columns), 5)),
-            )
-        except gspread.exceptions.APIError:
-            ws = sh.worksheet(tab_name)
-            ws.clear()
-
-        headers = df.columns.tolist()
-        rows = [headers] + _df_to_rows(df)
-        ws.update(rows, "A1")
-
-        _format_header(sh, ws, len(headers))
-
-        tab_info.append((tab_name, len(df), ws.id))
-        time.sleep(1.2)
-
-    # ── Cover page ──────────────────────────────────────────────────────────
-    if progress_cb:
-        progress_cb("🏠 Building cover page…")
-
-    _create_cover(sh, sheet_name, tab_info)
-
-    # Delete the temp placeholder sheet
     try:
-        sh.del_worksheet(sh.worksheet("_temp"))
-    except Exception:
-        pass
+        for display_name, df in dataframes.items():
+            if progress_cb:
+                progress_cb(f"📋 Writing: {display_name} ({len(df):,} rows)…")
+
+            tab_name = display_name[:99]
+
+            try:
+                try:
+                    ws = sh.add_worksheet(
+                        title=tab_name,
+                        rows=str(len(df) + 5),
+                        cols=str(max(len(df.columns), 5)),
+                    )
+                except gspread.exceptions.APIError:
+                    ws = sh.worksheet(tab_name)
+                    ws.clear()
+
+                headers = df.columns.tolist()
+                rows = [headers] + _df_to_rows(df)
+
+                # Write in chunks if large (Sheets API limit ~10MB per request)
+                chunk_size = 5000
+                for i in range(0, len(rows), chunk_size):
+                    chunk = rows[i:i + chunk_size]
+                    start_row = i + 1
+                    ws.update(chunk, f"A{start_row}")
+                    if len(rows) > chunk_size:
+                        time.sleep(0.5)
+
+                _format_header(sh, ws, len(headers))
+                tab_info.append((tab_name, len(df), ws.id))
+
+            except Exception as e:
+                skipped.append(f"{tab_name} ({e})")
+
+            time.sleep(1.2)
+
+        # ── Cover page ──────────────────────────────────────────────────────
+        if progress_cb:
+            progress_cb("🏠 Building cover page…")
+        _create_cover(sh, sheet_name, tab_info)
+
+    finally:
+        # Always clean up _temp regardless of what happened
+        try:
+            sh.del_worksheet(sh.worksheet("_temp"))
+        except Exception:
+            pass
+
+    if skipped and progress_cb:
+        progress_cb(f"⚠️ Skipped {len(skipped)} tab(s): {', '.join(skipped)}")
+
+    if not tab_info:
+        raise RuntimeError("No tabs were created successfully.")
 
     return f"https://docs.google.com/spreadsheets/d/{sh.id}"
 
