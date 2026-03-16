@@ -84,7 +84,7 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
                 for i in range(0, len(rows), chunk_size):
                     chunk = rows[i:i + chunk_size]
                     start_row = i + 1
-                    ws.update(chunk, f"A{start_row}")
+                    ws.update(chunk, f"A{start_row}", value_input_option="RAW")
                     if len(rows) > chunk_size:
                         time.sleep(0.5)
 
@@ -119,6 +119,8 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
+MAX_CELL_LEN = 1000  # Sheets API struggles with very long cells
+
 def _df_to_rows(df: pd.DataFrame) -> list:
     rows = []
     for _, row in df.iterrows():
@@ -127,7 +129,10 @@ def _df_to_rows(df: pd.DataFrame) -> list:
             if v is None or (isinstance(v, float) and pd.isna(v)):
                 clean.append("")
             else:
-                clean.append(str(v))
+                s = str(v)
+                if len(s) > MAX_CELL_LEN:
+                    s = s[:MAX_CELL_LEN] + "…"
+                clean.append(s)
         rows.append(clean)
     return rows
 
