@@ -1,0 +1,10 @@
+# Credentials — never commit these
+*.json
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
