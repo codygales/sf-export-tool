@@ -41,7 +41,7 @@ def get_client() -> gspread.Client:
 
 # ── Main export entry point ───────────────────────────────────────────────────
 
-def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=None, tab_stems: dict = None) -> str:
+def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=None) -> str:
     """
     Write issue DataFrames into an existing user-owned Google Sheet.
     Clears all existing worksheets and rebuilds from scratch.
@@ -110,7 +110,7 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
         # Cover page — always runs even if some tabs failed
         if progress_cb:
             progress_cb("🏠 Building cover page…")
-        _create_cover(sh, sheet_name, tab_info, overview_df=overview_df, tab_stems=tab_stems)
+        _create_cover(sh, sheet_name, tab_info, overview_df=overview_df)
 
     finally:
         # Always remove temp sheet
@@ -130,7 +130,7 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
 
 # ── Cover page ────────────────────────────────────────────────────────────────
 
-def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, overview_df=None, tab_stems: dict = None):
+def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, overview_df=None):
     cover = sh.add_worksheet(title="Cover", rows="300", cols="10")
 
     try:
@@ -140,7 +140,7 @@ def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, over
         pass
 
     # Build metadata lookup: tab_name → {type, priority, pct}
-    tab_meta = _build_tab_meta(tab_info, overview_df, tab_stems=tab_stems)
+    tab_meta = _build_tab_meta(tab_info, overview_df)
 
     timestamp  = datetime.now().strftime("%d %b %Y at %H:%M")
     total_urls = sum(c for _, c, _ in tab_info)
@@ -223,7 +223,7 @@ def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, over
         pass
 
 
-def _build_tab_meta(tab_info: list, overview_df, tab_stems: dict = None) -> dict:
+def _build_tab_meta(tab_info: list, overview_df) -> dict:
     """
     Match each tab to a row in the Issues Overview to get Type, Priority, and %.
     Returns dict of tab_name → {type, priority, pct}.
@@ -245,8 +245,8 @@ def _build_tab_meta(tab_info: list, overview_df, tab_stems: dict = None) -> dict
 
     for _, row in overview_df.iterrows():
         issue_name = str(row.get(name_col, ""))
-        match      = _fuzzy_match(issue_name, tab_names, tab_stems or {})
-        if match and match not in result:
+        match      = _fuzzy_match(issue_name, tab_names)
+        if match:
             result[match] = {
                 "type":     str(row.get(type_col, "")) if type_col else "",
                 "priority": str(row.get(pri_col,  "")) if pri_col  else "",
@@ -256,45 +256,18 @@ def _build_tab_meta(tab_info: list, overview_df, tab_stems: dict = None) -> dict
     return result
 
 
-def _normalise_words(s: str) -> set:
-    """
-    Tokenise a string into a set of normalised words.
-    Strips punctuation, lowercases, and adds de-pluralised forms so that
-    e.g. 'descriptions' also matches 'description'.
-    """
-    s = s.lower()
-    s = re.sub(r"[^a-z0-9]", " ", s)
-    result = set()
-    for w in s.split():
-        if len(w) < 2:
-            continue
-        result.add(w)
-        # simple de-plural: strip trailing 's' for words longer than 3 chars
-        if len(w) > 3 and w.endswith("s"):
-            result.add(w[:-1])
-    return result
+def _fuzzy_match(issue_name: str, tab_names: list) -> str | None:
+    """Find the best matching tab name for an SF issue name using word overlap."""
+    def words(s):
+        s = s.lower()
+        s = re.sub(r"[^a-z0-9]", " ", s)
+        return set(w for w in s.split() if len(w) > 1)
 
-
-def _fuzzy_match(issue_name: str, tab_names: list, tab_stems: dict) -> str | None:
-    """
-    Find the best matching tab name for an SF issue name.
-    Scores each tab against both its display name and original filename stem,
-    taking the higher of the two — then returns the best-scoring tab.
-    Requires at least 2 matching words to avoid false positives.
-    """
-    issue_words = _normalise_words(issue_name)
-    best, best_score = None, 1  # score must exceed 1 (i.e. ≥ 2 matches)
+    issue_words = words(issue_name)
+    best, best_score = None, 1  # require at least 2 matching words
 
     for tab in tab_names:
-        # Score against the pretty tab name
-        score = len(issue_words & _normalise_words(tab))
-
-        # Also score against the raw filename stem (closer to SF's internal names)
-        stem = tab_stems.get(tab, "")
-        if stem:
-            stem_score = len(issue_words & _normalise_words(stem.replace("_", " ")))
-            score = max(score, stem_score)
-
+        score = len(issue_words & words(tab))
         if score > best_score:
             best_score = score
             best = tab
