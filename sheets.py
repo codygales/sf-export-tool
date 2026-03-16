@@ -5,6 +5,7 @@ import gspread
 import pandas as pd
 import streamlit as st
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -18,10 +19,13 @@ LIGHT_GREEN = {"red": 0.878, "green": 0.961, "blue": 0.925}
 MID_GREY = {"red": 0.95, "green": 0.95, "blue": 0.95}
 
 
-def get_client() -> gspread.Client:
+def get_credentials() -> Credentials:
     info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-    return gspread.authorize(creds)
+    return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+
+def get_client() -> gspread.Client:
+    return gspread.authorize(get_credentials())
 
 
 def create_sheet(sheet_name: str, dataframes: dict, share_email: str, progress_cb=None) -> str:
@@ -40,9 +44,22 @@ def create_sheet(sheet_name: str, dataframes: dict, share_email: str, progress_c
 
     if share_email:
         try:
-            sh.share(share_email, perm_type="user", role="writer", notify=False)
+            # Transfer ownership so the file lives in the user's Drive,
+            # not the service account's (avoids quota issues)
+            creds = get_credentials()
+            drive = build("drive", "v3", credentials=creds)
+            drive.permissions().create(
+                fileId=sh.id,
+                transferOwnership=True,
+                sendNotificationEmail=False,
+                body={"type": "user", "role": "owner", "emailAddress": share_email},
+            ).execute()
         except Exception:
-            pass
+            # Fallback: share as writer if ownership transfer fails
+            try:
+                sh.share(share_email, perm_type="user", role="writer", notify=False)
+            except Exception:
+                pass
 
     # ── Build issue tabs ────────────────────────────────────────────────────
     tab_info = []  # [(tab_name, row_count, gid)]
