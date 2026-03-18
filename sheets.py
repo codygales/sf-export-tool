@@ -8,6 +8,21 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
+
+_RATE_LIMIT = 50          # max write calls per minute
+_MIN_GAP    = 60.0 / _RATE_LIMIT   # 1.2 seconds between calls
+_last_call  = 0.0
+
+
+def _retry(fn, *args, **kwargs):
+    """Rate-limit to 50 writes/minute then call fn(*args, **kwargs)."""
+    global _last_call
+    elapsed = time.time() - _last_call
+    if elapsed < _MIN_GAP:
+        time.sleep(_MIN_GAP - elapsed)
+    _last_call = time.time()
+    return fn(*args, **kwargs)
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -56,11 +71,11 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
     time.sleep(0.5)
 
     # Keep at least one sheet while clearing — add temp placeholder
-    temp = sh.add_worksheet(title="_temp", rows="1", cols="1")
+    temp = _retry(sh.add_worksheet, title="_temp", rows="1", cols="1")
     for ws in sh.worksheets():
         if ws.id != temp.id:
             try:
-                sh.del_worksheet(ws)
+                _retry(sh.del_worksheet, ws)
             except Exception:
                 pass
     time.sleep(0.5)
@@ -68,8 +83,9 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
     # Extract Issues Overview df if present — used to enrich cover page
     overview_df = dataframes.get("Issues Overview")
 
-    tab_info = []   # [(tab_name, row_count, gid)]
-    skipped  = []
+    tab_info        = []   # [(tab_name, row_count, gid)]
+    skipped         = []
+    header_requests = []   # accumulated — sent in one batch at the end
 
     try:
         for display_name, df in dataframes.items():
@@ -80,14 +96,13 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
 
             try:
                 try:
-                    ws = sh.add_worksheet(
-                        title=tab_name,
-                        rows=str(len(df) + 5),
-                        cols=str(max(len(df.columns), 5)),
-                    )
+                    ws = _retry(sh.add_worksheet,
+                                title=tab_name,
+                                rows=str(len(df) + 5),
+                                cols=str(max(len(df.columns), 5)))
                 except gspread.exceptions.APIError:
                     ws = sh.worksheet(tab_name)
-                    ws.clear()
+                    _retry(ws.clear)
 
                 headers = df.columns.tolist()
                 rows = [headers] + _df_to_rows(df)
@@ -95,17 +110,24 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
                 # Write in chunks with RAW mode (keeps data as-is, no formula parsing)
                 chunk_size = 5000
                 for i in range(0, len(rows), chunk_size):
-                    ws.update(rows[i:i + chunk_size], f"A{i + 1}", value_input_option="RAW")
+                    _retry(ws.update, rows[i:i + chunk_size], f"A{i + 1}", value_input_option="RAW")
                     if len(rows) > chunk_size:
                         time.sleep(0.5)
 
-                _format_header(sh, ws, len(headers))
+                # Queue header formatting instead of calling batch_update per tab
+                header_requests += _header_format_requests(ws.id, len(headers))
                 tab_info.append((tab_name, len(df), ws.id))
 
             except Exception as e:
                 skipped.append(f"{tab_name} ({e})")
 
-            time.sleep(1.2)
+        # One batch_update for all tab headers combined
+        if header_requests:
+            try:
+                _retry(sh.batch_update, {"requests": header_requests})
+            except Exception:
+                pass
+            time.sleep(0.5)
 
         # Cover page — always runs even if some tabs failed
         if progress_cb:
@@ -115,7 +137,7 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
     finally:
         # Always remove temp sheet
         try:
-            sh.del_worksheet(sh.worksheet("_temp"))
+            _retry(sh.del_worksheet, sh.worksheet("_temp"))
         except Exception:
             pass
 
@@ -131,11 +153,11 @@ def create_sheet(sheet_name: str, dataframes: dict, sheet_id: str, progress_cb=N
 # ── Cover page ────────────────────────────────────────────────────────────────
 
 def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, overview_df=None):
-    cover = sh.add_worksheet(title="Dashboard", rows="300", cols="10")
+    cover = _retry(sh.add_worksheet, title="Dashboard", rows="300", cols="10")
 
     try:
         all_ws = sh.worksheets()
-        sh.reorder_worksheets([cover] + [w for w in all_ws if w.id != cover.id])
+        _retry(sh.reorder_worksheets, [cover] + [w for w in all_ws if w.id != cover.id])
     except Exception:
         pass
 
@@ -171,7 +193,7 @@ def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, over
         row_types.append(issue_type.lower())
 
     # USER_ENTERED so the HYPERLINK formula is parsed correctly
-    cover.update(rows, "A1", value_input_option="USER_ENTERED")
+    _retry(cover.update, rows, "A1", value_input_option="USER_ENTERED")
 
     # Build colour requests per data row
     colour_requests = []
@@ -192,7 +214,7 @@ def _create_cover(sh: gspread.Spreadsheet, sheet_name: str, tab_info: list, over
         })
 
     try:
-        sh.batch_update({"requests": [
+        _retry(sh.batch_update, {"requests": [
             # Title
             {"repeatCell": {
                 "range": {"sheetId": cover.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 6},
@@ -277,22 +299,19 @@ def _fuzzy_match(issue_name: str, tab_names: list) -> str | None:
 
 # ── Tab formatting ────────────────────────────────────────────────────────────
 
-def _format_header(sh: gspread.Spreadsheet, ws: gspread.Worksheet, num_cols: int):
-    try:
-        sh.batch_update({"requests": [
-            {"repeatCell": {
-                "range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
-                "cell": {"userEnteredFormat": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE, "bold": True}}},
-                "fields": "userEnteredFormat(backgroundColor,textFormat)",
-            }},
-            {"updateSheetProperties": {
-                "properties": {"sheetId": ws.id, "gridProperties": {"frozenRowCount": 1}},
-                "fields": "gridProperties.frozenRowCount",
-            }},
-        ]})
-    except Exception:
-        pass
-    time.sleep(0.3)
+def _header_format_requests(sheet_id: int, num_cols: int) -> list:
+    """Return batch_update requests for a tab header — no API call made here."""
+    return [
+        {"repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
+            "cell": {"userEnteredFormat": {"backgroundColor": DARK_GREEN, "textFormat": {"foregroundColor": WHITE, "bold": True}}},
+            "fields": "userEnteredFormat(backgroundColor,textFormat)",
+        }},
+        {"updateSheetProperties": {
+            "properties": {"sheetId": sheet_id, "gridProperties": {"frozenRowCount": 1}},
+            "fields": "gridProperties.frozenRowCount",
+        }},
+    ]
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
